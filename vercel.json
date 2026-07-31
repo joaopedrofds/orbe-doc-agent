@@ -1,0 +1,8 @@
+{
+  "functions": {
+    "app/api/upload/route.ts": { "maxDuration": 30 },
+    "app/api/documents/route.ts": { "maxDuration": 10 },
+    "app/api/clients/route.ts": { "maxDuration": 10 },
+    "app/api/readme/route.ts": { "maxDuration": 10 }
+  }
+}
