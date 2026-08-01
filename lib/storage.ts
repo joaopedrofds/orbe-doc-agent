@@ -2,7 +2,8 @@ import fs from "fs/promises";
 import path from "path";
 import { createHash } from "crypto";
 
-export const UPLOADS_ROOT = process.env.UPLOADS_ROOT ?? path.join(process.cwd(), "uploads");
+export const UPLOADS_ROOT = (process.env.UPLOADS_ROOT ?? "").trim() ||
+  path.join(process.cwd(), "uploads");
 
 export const CATEGORIAS = [
   "Contratos",
