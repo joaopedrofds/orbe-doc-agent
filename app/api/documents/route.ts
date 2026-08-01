@@ -37,6 +37,7 @@ export async function GET(req: NextRequest) {
     if (isGlobal) {
       // Lê todos os subdiretórios de uploads/
       try {
+        await fs.mkdir(UPLOADS_ROOT, { recursive: true }).catch(() => {});
         const entries = await fs.readdir(UPLOADS_ROOT, { withFileTypes: true });
         clientDirs = entries
           .filter((e) => e.isDirectory() && CLIENT_ID_RE.test(e.name))

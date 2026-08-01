@@ -34,6 +34,7 @@ export async function POST(req: NextRequest) {
   const ip = getClientIp(req);
 
   try {
+    await fs.mkdir(UPLOADS_ROOT, { recursive: true }).catch(() => {});
     // Rate limiting por IP
     const rateLimit = checkRateLimit(ip);
     if (!rateLimit.allowed) {

@@ -9,6 +9,7 @@ const CLIENT_ID_RE = /^[a-zA-Z0-9_\-]{3,50}$/;
 
 export async function GET() {
   try {
+    await fs.mkdir(UPLOADS_ROOT, { recursive: true });
     const entries = await fs.readdir(UPLOADS_ROOT, { withFileTypes: true });
     const clients = entries
       .filter((e) => e.isDirectory() && CLIENT_ID_RE.test(e.name))
@@ -44,10 +45,19 @@ export async function POST(req: NextRequest) {
       // Não existe — pode criar
     }
 
-    await ensureClientFolders(clientId);
+    try {
+      await ensureClientFolders(clientId);
+    } catch (err) {
+      console.error("[clients POST] erro:", err);
+      return NextResponse.json(
+        { error: "Erro ao criar cliente: " + (err as Error).message },
+        { status: 500 }
+      );
+    }
 
     return NextResponse.json({ clientId }, { status: 201 });
-  } catch {
+  } catch (err) {
+    console.error("[clients POST] erro inesperado:", err);
     return NextResponse.json(
       { error: "Erro ao cadastrar cliente." },
       { status: 500 }

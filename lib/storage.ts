@@ -43,6 +43,9 @@ async function writeHashIndex(clientId: string, index: Record<string, HashEntry>
 }
 
 export async function ensureClientFolders(clientId: string): Promise<void> {
+  // Garante a raiz primeiro
+  await fs.mkdir(UPLOADS_ROOT, { recursive: true });
+  // Depois cada categoria
   for (const cat of CATEGORIAS) {
     await fs.mkdir(path.join(UPLOADS_ROOT, clientId, cat), { recursive: true });
   }

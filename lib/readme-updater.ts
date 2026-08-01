@@ -22,6 +22,8 @@ async function _appendToReadme(params: {
   const safe = (s: string) => s.replace(/\|/g, "\\|");
   const newRow = `| ${dateStr} | ${safe(filename)} | ${safe(categoria)} | ${safe(resumo)} |`;
 
+  await fs.mkdir(path.join(UPLOADS_ROOT, clientId), { recursive: true });
+
   let content: string;
   try {
     content = await fs.readFile(readmePath, "utf-8");
