@@ -1,66 +1,50 @@
 export const runtime = "nodejs";
 
 import { NextRequest, NextResponse } from "next/server";
-import fs from "fs/promises";
-import path from "path";
-import { UPLOADS_ROOT, ensureClientFolders } from "@/lib/storage";
-
-const CLIENT_ID_RE = /^[a-zA-Z0-9_\-]{3,50}$/;
+import { getSupabase, BUCKET } from "@/lib/supabase";
+import { ensureClientFolders } from "@/lib/storage";
 
 export async function GET() {
   try {
-    await fs.mkdir(UPLOADS_ROOT, { recursive: true });
-    const entries = await fs.readdir(UPLOADS_ROOT, { withFileTypes: true });
-    const clients = entries
-      .filter((e) => e.isDirectory() && CLIENT_ID_RE.test(e.name))
-      .map((e) => e.name)
-      .sort();
+    const { data, error } = await getSupabase().storage.from(BUCKET).list("", {
+      limit: 200,
+      offset: 0,
+    });
+
+    if (error) return NextResponse.json({ clients: [] });
+
+    // Filtra apenas "pastas" (itens sem extensão que são prefixos de clientId)
+    const clients = (data ?? [])
+      .filter(item => !item.name.startsWith(".") && item.metadata === null)
+      .map(item => item.name);
+
     return NextResponse.json({ clients });
   } catch {
-    // uploads/ ainda não existe
     return NextResponse.json({ clients: [] });
   }
 }
 
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json();
-    const clientId = body?.clientId?.trim();
+    const { clientId } = await req.json();
 
-    if (!clientId || !CLIENT_ID_RE.test(clientId)) {
-      return NextResponse.json(
-        { error: "ID inválido. Use 3-50 caracteres: letras, números, _ ou -" },
-        { status: 400 }
-      );
+    if (!clientId || !/^[a-zA-Z0-9_\-]{3,50}$/.test(clientId)) {
+      return NextResponse.json({ error: "ID inválido. Use 3-50 caracteres: letras, números, _ ou -" }, { status: 400 });
     }
 
-    const clientDir = path.join(UPLOADS_ROOT, clientId);
-    try {
-      await fs.access(clientDir);
-      return NextResponse.json(
-        { error: "Cliente já cadastrado." },
-        { status: 409 }
-      );
-    } catch {
-      // Não existe — pode criar
+    // Verifica se já existe checando se há arquivos com esse prefixo
+    const { data: existing } = await getSupabase().storage.from(BUCKET).list(clientId, { limit: 1 });
+    if (existing && existing.length > 0) {
+      return NextResponse.json({ error: "Cliente já cadastrado." }, { status: 409 });
     }
 
-    try {
-      await ensureClientFolders(clientId);
-    } catch (err) {
-      console.error("[clients POST] erro:", err);
-      return NextResponse.json(
-        { error: "Erro ao criar cliente: " + (err as Error).message },
-        { status: 500 }
-      );
-    }
+    // Cria um arquivo placeholder para "criar" a pasta do cliente
+    const placeholder = new Blob([""], { type: "text/plain" });
+    await getSupabase().storage.from(BUCKET).upload(`${clientId}/.init`, placeholder, { upsert: true });
 
     return NextResponse.json({ clientId }, { status: 201 });
   } catch (err) {
-    console.error("[clients POST] erro inesperado:", err);
-    return NextResponse.json(
-      { error: "Erro ao cadastrar cliente." },
-      { status: 500 }
-    );
+    console.error("[clients POST] erro:", err);
+    return NextResponse.json({ error: "Erro ao criar cliente." }, { status: 500 });
   }
 }

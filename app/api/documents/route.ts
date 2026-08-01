@@ -1,129 +1,85 @@
 export const runtime = "nodejs";
 
 import { NextRequest, NextResponse } from "next/server";
-import fs from "fs/promises";
-import path from "path";
-import { UPLOADS_ROOT, CATEGORIAS } from "@/lib/storage";
-
-interface DocumentEntry {
-  filename: string;
-  categoria: string;
-  caminho: string;
-  modifiedAt: string;
-  clientId: string;
-  resumo: string | null;
-}
-
-const CLIENT_ID_RE = /^[a-zA-Z0-9_\-]{3,50}$/;
+import { getSupabase, BUCKET } from "@/lib/supabase";
+import { CATEGORIAS } from "@/lib/storage";
 
 export async function GET(req: NextRequest) {
   try {
-    const clientIdParam = req.nextUrl.searchParams.get("clientId")?.trim() || "todos";
-    const categoriaFilter = req.nextUrl.searchParams.get("categoria")?.trim() || null;
-    const searchFilter = req.nextUrl.searchParams.get("search")?.trim() || null;
+    const { searchParams } = new URL(req.url);
+    const clientId = searchParams.get("clientId") ?? "todos";
+    const categoria = searchParams.get("categoria") ?? "";
+    const search = searchParams.get("search") ?? "";
 
-    const isGlobal = clientIdParam === "todos";
-
-    // Valida clientId apenas se for um valor específico
-    if (!isGlobal && !CLIENT_ID_RE.test(clientIdParam)) {
-      return NextResponse.json(
-        { documents: [], message: "ID de cliente inválido." },
-        { status: 400 }
-      );
+    if (clientId !== "todos" && !/^[a-zA-Z0-9_\-]{3,50}$/.test(clientId)) {
+      return NextResponse.json({ error: "ID inválido." }, { status: 400 });
     }
 
-    let clientDirs: string[];
-
-    if (isGlobal) {
-      // Lê todos os subdiretórios de uploads/
-      try {
-        await fs.mkdir(UPLOADS_ROOT, { recursive: true }).catch(() => {});
-        const entries = await fs.readdir(UPLOADS_ROOT, { withFileTypes: true });
-        clientDirs = entries
-          .filter((e) => e.isDirectory() && CLIENT_ID_RE.test(e.name))
-          .map((e) => e.name);
-      } catch {
-        return NextResponse.json({ documents: [] });
-      }
+    // Lista clientes a processar
+    let clientIds: string[] = [];
+    if (clientId === "todos") {
+      const { data } = await getSupabase().storage.from(BUCKET).list("", { limit: 200 });
+      clientIds = (data ?? [])
+        .filter(i => !i.name.startsWith(".") && i.metadata === null)
+        .map(i => i.name);
     } else {
-      clientDirs = [clientIdParam];
+      clientIds = [clientId];
     }
 
-    const validCategories = CATEGORIAS as readonly string[];
-    const docs: DocumentEntry[] = [];
+    const documents: Array<{
+      filename: string;
+      categoria: string;
+      caminho: string;
+      modifiedAt: string;
+      clientId: string;
+      resumo: string | null;
+    }> = [];
 
-    for (const cId of clientDirs) {
-      const clientDir = path.join(UPLOADS_ROOT, cId);
-      let categories: string[];
-      try {
-        categories = await fs.readdir(clientDir);
-      } catch {
-        continue;
-      }
+    const cats = categoria ? [categoria] : CATEGORIAS;
 
-      for (const cat of categories) {
-        if (!validCategories.includes(cat)) continue;
-        if (categoriaFilter && cat !== categoriaFilter) continue;
+    for (const cid of clientIds) {
+      for (const cat of cats) {
+        const { data: files } = await getSupabase().storage
+          .from(BUCKET)
+          .list(`${cid}/${cat}`, { limit: 500 });
 
-        const catDir = path.join(clientDir, cat);
-        let files: string[];
-        try {
-          files = await fs.readdir(catDir);
-        } catch {
-          continue;
-        }
+        if (!files) continue;
 
-        for (const file of files) {
-          // Ignora arquivos de metadados
-          if (file.endsWith(".meta.json")) continue;
+        const realFiles = files.filter(
+          f => !f.name.startsWith(".") && !f.name.endsWith(".meta.json")
+        );
 
-          const filePath = path.join(catDir, file);
-          let stat: import("fs").Stats;
-          try {
-            stat = await fs.stat(filePath);
-          } catch {
-            continue;
-          }
-          if (!stat.isFile()) continue;
-
-          const caminhoRel = path.join("uploads", cId, cat, file);
-
-          if (searchFilter && !file.toLowerCase().includes(searchFilter.toLowerCase())) {
-            continue;
-          }
+        for (const file of realFiles) {
+          if (search && !file.name.toLowerCase().includes(search.toLowerCase())) continue;
 
           // Tenta ler metadados
           let resumo: string | null = null;
-          const metaPath = filePath + ".meta.json";
-          try {
-            const metaRaw = await fs.readFile(metaPath, "utf-8");
-            const meta = JSON.parse(metaRaw);
-            resumo = meta.resumo ?? null;
-          } catch {
-            // Arquivo antigo sem metadados
+          const { data: metaBlob } = await getSupabase().storage
+            .from(BUCKET)
+            .download(`${cid}/${cat}/${file.name}.meta.json`);
+
+          if (metaBlob) {
+            try {
+              const meta = JSON.parse(await metaBlob.text());
+              resumo = meta.resumo ?? null;
+            } catch { /* sem meta */ }
           }
 
-          docs.push({
-            filename: file,
+          documents.push({
+            filename: file.name,
             categoria: cat,
-            caminho: caminhoRel,
-            modifiedAt: stat.mtime.toISOString(),
-            clientId: cId,
+            caminho: `${cid}/${cat}/${file.name}`,
+            modifiedAt: file.updated_at ?? file.created_at ?? new Date().toISOString(),
+            clientId: cid,
             resumo,
           });
         }
       }
     }
 
-    // Ordena do mais recente para o mais antigo
-    docs.sort((a, b) => new Date(b.modifiedAt).getTime() - new Date(a.modifiedAt).getTime());
-
-    return NextResponse.json({ documents: docs });
+    return NextResponse.json({ documents });
   } catch (err) {
     console.error("[documents] erro:", err);
-    return NextResponse.json(
-      { documents: [], message: "Erro ao listar documentos." },
-      { status: 500 }
-    );
+    return NextResponse.json({ documents: [] });
   }
 }

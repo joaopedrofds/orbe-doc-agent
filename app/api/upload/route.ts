@@ -1,7 +1,5 @@
 export const runtime = "nodejs";
 
-import fs from "fs/promises";
-import path from "path";
 import { NextRequest, NextResponse } from "next/server";
 import { extractText } from "@/lib/extractor";
 import { sanitizeWithReport } from "@/lib/sanitizer";
@@ -10,6 +8,7 @@ import { saveDocument, UPLOADS_ROOT } from "@/lib/storage";
 import { appendToReadme } from "@/lib/readme-updater";
 import { checkRateLimit } from "@/lib/rate-limiter";
 import { logEvent } from "@/lib/logger";
+import { getSupabase, BUCKET } from "@/lib/supabase";
 
 const CLIENT_ID_RE = /^[a-zA-Z0-9_\-]{3,50}$/;
 
@@ -34,7 +33,6 @@ export async function POST(req: NextRequest) {
   const ip = getClientIp(req);
 
   try {
-    await fs.mkdir(UPLOADS_ROOT, { recursive: true }).catch(() => {});
     // Rate limiting por IP
     const rateLimit = checkRateLimit(ip);
     if (!rateLimit.allowed) {
@@ -126,12 +124,12 @@ export async function POST(req: NextRequest) {
       const caminhoFinal = saveResult.caminho;
 
       if (!saveResult.duplicate) {
-        // Salva .meta.json normalmente
-        const absPath = path.join(UPLOADS_ROOT, clientId, categoria, path.basename(caminhoFinal));
-        await fs.writeFile(
-          absPath + ".meta.json",
-          JSON.stringify({ resumo, categoria, clientId, filename, uploadedAt: new Date().toISOString() })
-        );
+        // Salva metadados no Supabase
+        const meta = JSON.stringify({ resumo, categoria, clientId, filename, uploadedAt: new Date().toISOString() });
+        const metaBlob = new Blob([meta], { type: "application/json" });
+        await getSupabase().storage
+          .from(BUCKET)
+          .upload(`${clientId}/${categoria}/${filename}.meta.json`, metaBlob, { upsert: true });
       }
 
       // Atualiza README com nota de duplicata se for o caso

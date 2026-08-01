@@ -1,9 +1,6 @@
-import fs from "fs/promises";
-import path from "path";
+import { getSupabase, BUCKET } from "./supabase";
 import { createHash } from "crypto";
-
-export const UPLOADS_ROOT = (process.env.UPLOADS_ROOT ?? "").trim() ||
-  path.join(process.cwd(), "uploads");
+import path from "path";
 
 export const CATEGORIAS = [
   "Contratos",
@@ -15,41 +12,23 @@ export const CATEGORIAS = [
 
 export type Categoria = (typeof CATEGORIAS)[number];
 
+// UPLOADS_ROOT mantido apenas para compatibilidade local
+export const UPLOADS_ROOT = (process.env.UPLOADS_ROOT ?? "").trim() ||
+  path.join(process.cwd(), "uploads");
+
+export interface SaveResult {
+  caminho: string;
+  duplicate: boolean;
+  duplicateOf?: string;
+}
+
 function computeHash(buffer: Buffer): string {
   return createHash("md5").update(buffer).digest("hex");
 }
 
-const HASHES_FILE = ".hashes.json";
-
-interface HashEntry {
-  filename: string;
-  caminho: string;
-  categoria: string;
-  uploadedAt: string;
-}
-
-async function readHashIndex(clientId: string): Promise<Record<string, HashEntry>> {
-  const p = path.join(UPLOADS_ROOT, clientId, HASHES_FILE);
-  try {
-    const raw = await fs.readFile(p, "utf-8");
-    return JSON.parse(raw);
-  } catch {
-    return {};
-  }
-}
-
-async function writeHashIndex(clientId: string, index: Record<string, HashEntry>): Promise<void> {
-  const p = path.join(UPLOADS_ROOT, clientId, HASHES_FILE);
-  await fs.writeFile(p, JSON.stringify(index, null, 2), "utf-8");
-}
-
-export async function ensureClientFolders(clientId: string): Promise<void> {
-  // Garante a raiz primeiro
-  await fs.mkdir(UPLOADS_ROOT, { recursive: true });
-  // Depois cada categoria
-  for (const cat of CATEGORIAS) {
-    await fs.mkdir(path.join(UPLOADS_ROOT, clientId, cat), { recursive: true });
-  }
+// Caminho no bucket: {clientId}/{categoria}/{filename}
+function bucketPath(clientId: string, categoria: string, filename: string): string {
+  return `${clientId}/${categoria}/${filename}`;
 }
 
 function sanitizeFilename(name: string): string {
@@ -61,10 +40,34 @@ function sanitizeFilename(name: string): string {
     .slice(0, 200);
 }
 
-export interface SaveResult {
-  caminho: string;
-  duplicate: boolean;
-  duplicateOf?: string;
+async function readHashIndex(clientId: string): Promise<Record<string, { filename: string; caminho: string; categoria: string; uploadedAt: string }>> {
+  const { data } = await getSupabase().storage
+    .from(BUCKET)
+    .download(`${clientId}/.hashes.json`);
+
+  if (!data) return {};
+
+  try {
+    const text = await data.text();
+    return JSON.parse(text);
+  } catch {
+    return {};
+  }
+}
+
+async function writeHashIndex(clientId: string, index: Record<string, unknown>): Promise<void> {
+  const blob = new Blob([JSON.stringify(index, null, 2)], { type: "application/json" });
+  await getSupabase().storage
+    .from(BUCKET)
+    .upload(`${clientId}/.hashes.json`, blob, { upsert: true });
+}
+
+export async function ensureClientFolders(clientId: string): Promise<void> {
+  // No Supabase Storage não há pastas reais — são criadas automaticamente no upload
+  // Apenas valida o clientId
+  if (!/^[a-zA-Z0-9_\-]{3,50}$/.test(clientId)) {
+    throw new Error("ID de cliente inválido.");
+  }
 }
 
 export async function saveDocument(params: {
@@ -74,8 +77,6 @@ export async function saveDocument(params: {
   buffer: Buffer;
 }): Promise<SaveResult> {
   const { clientId, categoria, filename, buffer } = params;
-
-  await ensureClientFolders(clientId);
 
   const hash = computeHash(buffer);
   const index = await readHashIndex(clientId);
@@ -89,61 +90,29 @@ export async function saveDocument(params: {
     };
   }
 
-  // Salva arquivo normalmente
   const ext = path.extname(filename);
   const base = path.basename(filename, ext);
   const safeName = sanitizeFilename(base) + ext;
-  const destDir = path.join(UPLOADS_ROOT, clientId, categoria);
 
-  let finalName = safeName;
-  try {
-    await fs.access(path.join(destDir, safeName));
-    finalName = `${sanitizeFilename(base)}_${Date.now()}${ext}`;
-  } catch {
-    // nome livre
-  }
+  // Verifica colisão de nome
+  const { data: existing } = await getSupabase().storage.from(BUCKET).list(`${clientId}/${categoria}`);
+  const nameExists = existing?.some(f => f.name === safeName);
+  const finalName = nameExists ? `${sanitizeFilename(base)}_${Date.now()}${ext}` : safeName;
 
-  const destPath = path.join(destDir, finalName);
-  await fs.writeFile(destPath, buffer);
+  const filePath = bucketPath(clientId, categoria, finalName);
 
-  const caminho = path.join("uploads", clientId, categoria, finalName);
+  const blob = new Blob([new Uint8Array(buffer)]);
+  const { error } = await getSupabase().storage
+    .from(BUCKET)
+    .upload(filePath, blob, { upsert: false });
 
-  // Registra no índice de hashes
+  if (error) throw new Error(`Erro ao salvar arquivo: ${error.message}`);
+
+  const caminho = filePath;
+
+  // Atualiza índice de hashes
   index[hash] = { filename: finalName, caminho, categoria, uploadedAt: new Date().toISOString() };
   await writeHashIndex(clientId, index);
 
   return { caminho, duplicate: false };
-}
-
-export async function saveDocumentWithMeta(params: {
-  clientId: string;
-  categoria: string;
-  filename: string;
-  buffer: Buffer;
-  resumo: string;
-}): Promise<{ relativePath: string; absolutePath: string; duplicate: boolean; duplicateOf?: string }> {
-  const saveResult = await saveDocument(params);
-  const absolutePath = path.join(UPLOADS_ROOT, params.clientId, params.categoria, path.basename(saveResult.caminho));
-
-  if (!saveResult.duplicate) {
-    // Salva metadados adjacentes
-    const metaPath = absolutePath + ".meta.json";
-    await fs.writeFile(
-      metaPath,
-      JSON.stringify({
-        resumo: params.resumo,
-        categoria: params.categoria,
-        clientId: params.clientId,
-        filename: params.filename,
-        uploadedAt: new Date().toISOString(),
-      })
-    );
-  }
-
-  return {
-    relativePath: saveResult.caminho,
-    absolutePath,
-    duplicate: saveResult.duplicate,
-    duplicateOf: saveResult.duplicateOf,
-  };
 }
